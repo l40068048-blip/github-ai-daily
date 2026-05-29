@@ -9,6 +9,8 @@ on:
 jobs:
   fetch-and-report:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write  # 私有仓库需要显式授权写权限
     steps:
       - uses: actions/checkout@v4
 
@@ -35,3 +37,4 @@ jobs:
           file_pattern: "github_ai_daily_*.md"
           commit_user_name: "AI Daily Bot"
           commit_user_email: "ai-daily-bot@users.noreply.github.com"
+          token: ${{ secrets.GITHUB_TOKEN }}
