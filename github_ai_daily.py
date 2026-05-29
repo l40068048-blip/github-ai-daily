@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """
 GitHub AI 日报 - 每天获取 GitHub 上最新的 AI 相关热门仓库
-支持推送到微信（Server酱 / PushPlus）
+支持中文翻译 + 推送到微信（PushPlus / Server酱）
+
 用法:
-    python github_ai_daily.py                    # 仅终端显示 + 保存文件
-    python github_ai_daily.py --push             # 推送微信（自动检测环境变量）
-    python github_ai_daily.py --pushplus 你的Token  # 使用 PushPlus 推送
-    python github_ai_daily.py --serverchan 你的Key  # 使用 Server酱 推送
+    python github_ai_daily.py                         # 终端显示 + 保存文件
+    python github_ai_daily.py --push                  # 推送微信（中文翻译）
+    python github_ai_daily.py --pushplus 你的Token     # 指定 PushPlus
+    python github_ai_daily.py --no-translate           # 不翻译，保持英文
 """
 
 import requests
@@ -14,6 +15,7 @@ import re
 import sys
 import os
 import argparse
+import urllib.parse
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 
@@ -43,6 +45,58 @@ AI_KEYWORDS = [
 ]
 
 EXCLUDE_KEYWORDS = ["ai generated", "ai writing", "去除ai"]
+
+
+# ============================================================
+# 翻译（免费 MyMemory API）
+# ============================================================
+
+_translation_cache = {}
+
+def translate_text(text, target="zh-CN"):
+    """将英文翻译成中文，使用 MyMemory 免费 API"""
+    if not text or len(text.strip()) < 3:
+        return text
+    
+    # 如果已经是中文，不翻译
+    if re.search(r'[\u4e00-\u9fff]', text):
+        return text
+    
+    # 缓存命中
+    cache_key = (text, target)
+    if cache_key in _translation_cache:
+        return _translation_cache[cache_key]
+    
+    try:
+        url = "https://api.mymemory.translated.net/get"
+        params = {
+            "q": text[:500],  # API 限制长度
+            "langpair": f"en|{target}",
+        }
+        resp = requests.get(url, params=params, timeout=10)
+        data = resp.json()
+        
+        if data.get("responseStatus") == 200:
+            translated = data.get("responseData", {}).get("translatedText", "")
+            if translated:
+                # 解码 HTML 实体（如 &#39; → '）
+                translated = translated.replace("&#39;", "'").replace("&amp;", "&")
+                _translation_cache[cache_key] = translated
+                return translated
+        
+        return text  # 翻译失败，返回原文
+    except Exception:
+        return text  # 出错时返回原文
+
+
+def translate_description(desc):
+    """翻译仓库描述，智能处理混合内容"""
+    if not desc:
+        return ""
+    # 如果已含中文，不翻译
+    if re.search(r'[\u4e00-\u9fff]', desc):
+        return desc
+    return translate_text(desc)
 
 
 # ============================================================
@@ -180,7 +234,7 @@ def is_ai_related(repo):
 # ============================================================
 
 def format_console_report(ai_repos, total_repos):
-    """终端显示"""
+    """终端显示（保持英文，原汁原味）"""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     lines = [
         "=" * 72,
@@ -216,48 +270,67 @@ def format_console_report(ai_repos, total_repos):
     return '\n'.join(lines)
 
 
-def build_push_content(ai_repos, total_repos):
-    """生成推送内容（纯文本，适配微信消息长度）"""
+def build_push_content(ai_repos, total_repos, translate=True):
+    """生成微信推送内容（带中文翻译）"""
     today = datetime.now(timezone.utc).strftime("%m-%d")
     lines = [f"🤖 GitHub AI 日报 | {today}"]
     lines.append(f"今日热门 {total_repos} 个，AI 相关 {len(ai_repos)} 个")
     lines.append("")
+    
     for i, repo in enumerate(ai_repos[:12], 1):
         fn = repo.get('full_name', '?')
         desc = repo.get('description', '') or ''
+        
+        # 翻译描述
+        if translate and desc:
+            desc_cn = translate_description(desc)
+            if desc_cn != desc:
+                desc = f"{desc_cn}"
+        
         lines.append(f"{i}. {fn}")
         if desc:
-            d = desc[:60] + '...' if len(desc) > 60 else desc
+            d = desc[:80] + '...' if len(desc) > 80 else desc
             lines.append(f"   {d}")
         topics = repo.get('topics', [])
         if topics:
             lines.append(f"   {' '.join(f'#{t}' for t in topics[:3])}")
         lines.append("")
+    
     lines.append(f"完整榜单: https://github.com/trending?since=daily")
     return '\n'.join(lines)
 
 
-def build_push_markdown(ai_repos, total_repos):
-    """生成 Markdown 推送内容"""
+def build_push_markdown(ai_repos, total_repos, translate=True):
+    """生成 Markdown 推送内容（带中文翻译）"""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     md = f"# 🤖 GitHub AI 日报 - {today}\n\n"
     md += f"> 今日热门 **{total_repos}** 个，AI 相关 **{len(ai_repos)}** 个\n\n---\n\n"
+    
     for i, repo in enumerate(ai_repos[:12], 1):
         fn = repo.get('full_name', '?')
         desc = repo.get('description', '') or '暂无描述'
+        
+        # 翻译描述
+        if translate and desc:
+            desc_cn = translate_description(desc)
+            if desc_cn != desc:
+                desc = f"~~{desc}~~  \n{desc_cn}"
+        
         topics = repo.get('topics', [])
         md += f"### {i}. [{fn}](https://github.com/{fn})\n\n{desc}\n\n"
         if topics:
             md += ' '.join(f'`{t}`' for t in topics[:5]) + '\n\n'
         md += "---\n\n"
+    
     md += f"\n> [查看完整 Trending](https://github.com/trending?since=daily)"
     return md
 
 
 def save_markdown(ai_repos, total_repos):
-    """保存完整 Markdown 文件"""
+    """保存完整 Markdown 文件（中英双语，含翻译）"""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     filename = f"github_ai_daily_{today}.md"
+    
     md = f"""# 🤖 GitHub AI 日报 - {today}
 
 > 每日自动生成，筛选自 [GitHub Trending](https://github.com/trending?since=daily)
@@ -280,10 +353,19 @@ def save_markdown(ai_repos, total_repos):
         fn = repo.get('full_name', '?')
         desc = repo.get('description', '') or '暂无描述'
         topics = repo.get('topics', [])
-        md += f"### {i}. [{fn}](https://github.com/{fn})\n\n{desc}\n\n"
+        
+        # 双语显示
+        desc_cn = translate_description(desc)
+        if desc_cn and desc_cn != desc:
+            desc_display = f"{desc_cn}\n> {desc}"
+        else:
+            desc_display = desc
+        
+        md += f"### {i}. [{fn}](https://github.com/{fn})\n\n{desc_display}\n\n"
         if topics:
             md += ' '.join(f'`{t}`' for t in topics[:8]) + '\n\n'
         md += "---\n\n"
+    
     md += f"""---
 
 *数据来源: [GitHub Trending](https://github.com/trending?since=daily)*
@@ -299,11 +381,7 @@ def save_markdown(ai_repos, total_repos):
 # ============================================================
 
 def push_serverchan(title, content, token):
-    """
-    Server酱·Turbo版
-    官网: https://sct.ftqq.com （可能部分网络不稳定）
-    替代: PushPlus（见下）
-    """
+    """Server酱·Turbo版"""
     if not token:
         print("⚠️  未提供 Server酱 SendKey")
         return False
@@ -323,12 +401,7 @@ def push_serverchan(title, content, token):
 
 
 def push_pushplus(title, content, token):
-    """
-    PushPlus（推送加）- 国内稳定，推荐！
-    官网: https://www.pushplus.plus
-    注册 → 一对一推送 → 复制 Token
-    免费版每天 200 条，完全够用
-    """
+    """PushPlus（推送加）- 国内稳定"""
     if not token:
         print("⚠️  未提供 PushPlus Token")
         return False
@@ -361,18 +434,21 @@ def main():
         description="🤖 GitHub AI 日报 - 每天获取 AI 相关热门仓库",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-推送方式（二选一，推荐 PushPlus）:
-  --pushplus TOKEN      通过 PushPlus 推送到微信（国内稳定，推荐）
-  --serverchan SENDKEY  通过 Server酱 推送到微信
+推送方式（推荐 PushPlus）:
+  --pushplus TOKEN      通过 PushPlus 推送到微信（国内稳定）
 
-环境变量（免去每次传参）:
+翻译控制:
+  --no-translate        保持英文，不翻译为中文
+  (默认推送时自动翻译为中文)
+
+环境变量:
   PUSHPLUS_TOKEN        设置 PushPlus Token
   SERVERCHAN_SENDKEY    设置 Server酱 SendKey
 
 示例:
-  python github_ai_daily.py
-  python github_ai_daily.py --pushplus xxxxxx
-  python github_ai_daily.py --push              # 自动读取环境变量
+  python github_ai_daily.py                          # 终端查看
+  python github_ai_daily.py --pushplus 你的Token      # 推送中文到微信
+  python github_ai_daily.py --push --no-translate     # 推送英文
         """
     )
     parser.add_argument('--push', action='store_true',
@@ -385,7 +461,11 @@ def main():
                        help='Server酱 SendKey（不传参则读 SERVERCHAN_SENDKEY 环境变量）')
     parser.add_argument('--no-save', action='store_true',
                        help='不保存 Markdown 文件')
+    parser.add_argument('--no-translate', action='store_true',
+                       help='不翻译为中文，保持英文原文')
     args = parser.parse_args()
+
+    do_translate = not args.no_translate
 
     # ====== 获取数据 ======
     print("🚀 正在获取 GitHub Trending 数据...")
@@ -407,20 +487,21 @@ def main():
     # ====== 终端报告 ======
     print(format_console_report(ai_repos, len(repos)))
 
-    # ====== 保存文件 ======
+    # ====== 保存文件（含中文翻译） ======
     if not args.no_save:
+        print("🌐 正在翻译描述为中文...")
         md_file = save_markdown(ai_repos, len(repos))
         print(f"📄 报告已保存: {md_file}")
 
     # ====== 微信推送 ======
     today_title = f"🤖 GitHub AI 日报 {datetime.now(timezone.utc).strftime('%m-%d')}"
-    push_md = build_push_markdown(ai_repos, len(repos))
+    
+    if do_translate:
+        print("🌐 正在翻译推送内容...")
+    push_md = build_push_markdown(ai_repos, len(repos), translate=do_translate)
 
     pushed = False
 
-    # 优先级: --pushplus > --serverchan > --push
-
-    # 1) --pushplus
     if args.pushplus:
         token = os.environ.get("PUSHPLUS_TOKEN") if args.pushplus == 'FROM_ENV' else args.pushplus
         if not token or token == 'FROM_ENV':
@@ -428,9 +509,8 @@ def main():
         if token:
             pushed = push_pushplus(today_title, push_md, token)
         else:
-            print("⚠️  使用 --pushplus 但未提供 Token，请设置 PUSHPLUS_TOKEN 环境变量")
+            print("⚠️  使用 --pushplus 但未提供 Token")
 
-    # 2) --serverchan
     elif args.serverchan:
         key = os.environ.get("SERVERCHAN_SENDKEY") if args.serverchan == 'FROM_ENV' else args.serverchan
         if not key or key == 'FROM_ENV':
@@ -438,9 +518,8 @@ def main():
         if key:
             pushed = push_serverchan(today_title, push_md, key)
         else:
-            print("⚠️  使用 --serverchan 但未提供 SendKey，请设置 SERVERCHAN_SENDKEY 环境变量")
+            print("⚠️  使用 --serverchan 但未提供 SendKey")
 
-    # 3) --push（自动检测）
     elif args.push:
         pp_token = os.environ.get("PUSHPLUS_TOKEN")
         sc_key = os.environ.get("SERVERCHAN_SENDKEY")
@@ -450,8 +529,6 @@ def main():
             pushed = push_serverchan(today_title, push_md, sc_key)
         else:
             print("⚠️  使用 --push 但未设置 PUSHPLUS_TOKEN 或 SERVERCHAN_SENDKEY")
-            print("   推送加: https://www.pushplus.plus")
-            print("   Server酱: https://sct.ftqq.com")
 
     # ====== 使用提示 ======
     print("\n" + "─" * 50)
